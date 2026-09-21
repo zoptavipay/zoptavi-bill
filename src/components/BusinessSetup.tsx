@@ -14,7 +14,7 @@ export default function BusinessSetup({ initial, onDone }: BusinessSetupProps) {
   return (
     <div className="setup-screen">
       <div className="setup-card">
-        <span className="setup-eyebrow">Welcome to Zoptavi Pay</span>
+        <span className="setup-eyebrow">Welcome to Zoptavi Tab</span>
         <h1>Let's set up your store</h1>
         <p className="setup-intro">
           A few details for your invoices — GSTIN and address are optional if you're not GST-registered

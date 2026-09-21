@@ -1,7 +1,7 @@
 import { get, set, update, createStore, keys, del } from 'idb-keyval';
 import type { Bill, Item, StoreSettings } from '../types';
 
-// Dedicated IndexedDB database for Zoptavi Bill (kept isolated from any other
+// Dedicated IndexedDB database for Zoptavi Tab (kept isolated from any other
 // site data, per the "separate project" decision).
 const store = createStore('zoptavi-bill-db', 'kv');
 

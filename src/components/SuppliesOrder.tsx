@@ -27,7 +27,7 @@ export default function SuppliesOrder({ settings, onClose }: SuppliesOrderProps)
   function sendOrder() {
     const summary = lines.map((l) => `${l.qty} × ${l.label}`).join('\n');
     const text = encodeURIComponent(
-      `New supply order request\nStore: ${settings.storeName}${settings.phone ? ` (${settings.phone})` : ''}\n\n${summary}\n\n— sent from Zoptavi Pay`,
+      `New supply order request\nStore: ${settings.storeName}${settings.phone ? ` (${settings.phone})` : ''}\n\n${summary}\n\n— sent from Zoptavi Tab`,
     );
     const phone = settings.supplyContactPhone?.replace(/\D/g, '');
     const waUrl = phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`;

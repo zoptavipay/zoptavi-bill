@@ -1,4 +1,4 @@
-// Core data model for Zoptavi Bill — core billing MVP (single store, offline-first)
+// Core data model for Zoptavi Tab — core billing MVP (single store, offline-first)
 
 export interface Item {
   id: string;

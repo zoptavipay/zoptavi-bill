@@ -10,8 +10,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
       manifest: {
-        name: 'Zoptavi Bill',
-        short_name: 'Zoptavi Bill',
+        name: 'Zoptavi Tab',
+        short_name: 'Zoptavi Tab',
         description: 'Offline-first GST billing for small stores.',
         theme_color: '#1a1a1a',
         background_color: '#f4f4f2',

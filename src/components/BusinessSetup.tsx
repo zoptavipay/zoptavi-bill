@@ -4,10 +4,12 @@ import './BusinessSetup.css';
 
 interface BusinessSetupProps {
   initial: StoreSettings;
-  onDone: (settings: StoreSettings) => void;
+  onDone: (settings: StoreSettings) => void | Promise<void>;
+  saving?: boolean;
+  saveError?: string | null;
 }
 
-export default function BusinessSetup({ initial, onDone }: BusinessSetupProps) {
+export default function BusinessSetup({ initial, onDone, saving, saveError }: BusinessSetupProps) {
   const [form, setForm] = useState<StoreSettings>({ ...initial, storeName: initial.storeName === 'My Store' ? '' : initial.storeName });
   const canContinue = form.storeName.trim().length > 0;
 
@@ -55,12 +57,14 @@ export default function BusinessSetup({ initial, onDone }: BusinessSetupProps) {
           </select>
         </label>
 
+        {saveError && <p className="setup-error">{saveError}</p>}
+
         <button
           className="btn-solid"
-          disabled={!canContinue}
+          disabled={!canContinue || !!saving}
           onClick={() => onDone({ ...form, onboarded: true })}
         >
-          Start billing
+          {saving ? 'Saving…' : 'Start billing'}
         </button>
       </div>
     </div>

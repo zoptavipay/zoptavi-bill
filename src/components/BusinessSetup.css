@@ -34,3 +34,13 @@
 }
 
 .setup-card .btn-solid { width: 100%; margin-top: 6px; padding: 12px; font-size: 14px; }
+
+.setup-error {
+  font-size: 12px;
+  color: #a3271f;
+  background: #fdecea;
+  border: 1px solid #f5c2bd;
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin: -2px 0 4px;
+}

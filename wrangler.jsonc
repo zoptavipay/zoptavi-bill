@@ -1,9 +1,22 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "zoptavi-bill",
+  "main": "src/worker/index.ts",
   "compatibility_date": "2026-09-21",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "zoptavi-tab",
+      "database_id": "f1030253-ab1f-44f9-94b8-162f44481024"
+    }
+  ],
+  "vars": {
+    "GOOGLE_CLIENT_ID": "327393382045-qikr1uk2vqeqt74g9186dqe2h08g1u7r.apps.googleusercontent.com",
+    "SESSION_SECRET": "afb035e4d7db270b33e80fc1a86366d5357ca401c60ccd04a7dd14dbd40d4818"
   }
 }

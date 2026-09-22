@@ -40,7 +40,10 @@ export interface Bill {
   subtotal: number; // sum of lineTotal
   totalCgst: number;
   totalSgst: number;
-  grandTotal: number;
+  discountType?: 'flat' | 'percent'; // how the discount was entered, for display/editing later
+  discountValue?: number; // the raw number the shop typed (₹ amount, or % points)
+  discountAmount: number; // resolved ₹ amount actually taken off, clamped to the pre-discount total
+  grandTotal: number; // final payable amount = subtotal + CGST + SGST − discountAmount
   paymentMode: 'cash' | 'upi' | 'card' | 'credit';
   customerName?: string;
   customerPhone?: string;

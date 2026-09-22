@@ -105,6 +105,10 @@ export function buildBillPdf(bill: Bill, settings: StoreSettings): Blob {
   totalsLine('Subtotal', formatINR(bill.subtotal));
   totalsLine('CGST', formatINR(bill.totalCgst));
   totalsLine('SGST', formatINR(bill.totalSgst));
+  if (bill.discountAmount > 0) {
+    const label = bill.discountType === 'percent' ? `Discount (${bill.discountValue}%)` : 'Discount';
+    totalsLine(label, `-${formatINR(bill.discountAmount)}`);
+  }
   totalsLine('Grand Total', formatINR(bill.grandTotal), true);
   totalsLine('Payment', bill.paymentMode.toUpperCase());
 

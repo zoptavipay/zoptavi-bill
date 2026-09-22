@@ -16,9 +16,9 @@
 .signin-error {
   margin-top: 14px;
   padding: 10px 12px;
-  background: #fdecea;
-  border: 1px solid #f5c2bd;
-  border-radius: 8px;
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-sm);
   text-align: center;
 }
 
@@ -26,4 +26,9 @@
   margin: 0 0 8px;
   font-size: 12.5px;
   color: #a3271f;
+}
+
+.signin-button-wrap > div {
+  max-width: 100%;
+  overflow: hidden;
 }

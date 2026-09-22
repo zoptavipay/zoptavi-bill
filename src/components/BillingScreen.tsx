@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Bill, BillLine, Item, StoreSettings } from '../types';
-import { makeBillLine, totalsForLines, formatINR, exclusiveFromMrp, round2 } from '../lib/gst';
+import { makeBillLine, totalsForLines, formatINR, exclusiveFromMrp, round2, resolveDiscountAmount } from '../lib/gst';
 import { getItems, updateItemStock, nextBillNumber, saveBill, getSettings, saveSettings, addItem, updateItem } from '../lib/db';
 import { syncNow } from '../lib/sync';
 import { buildBillPdf, billPdfFileName } from '../lib/pdf';
 import { lookupBarcodeOnline } from '../lib/barcodeLookup';
+import { LOW_STOCK_THRESHOLD } from '../lib/stats';
 import Receipt from './Receipt';
 import BarcodeScanner from './BarcodeScanner';
 import CustomerLedger from './CustomerLedger';
@@ -22,6 +23,8 @@ export default function BillingScreen() {
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerGstin, setCustomerGstin] = useState('');
+  const [discountType, setDiscountType] = useState<'flat' | 'percent'>('flat');
+  const [discountValue, setDiscountValue] = useState('');
   const [lastBill, setLastBill] = useState<Bill | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
@@ -30,6 +33,8 @@ export default function BillingScreen() {
   const [showLedger, setShowLedger] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
   const [showSupplies, setShowSupplies] = useState(false);
+  const [mobileCartOpen, setMobileCartOpen] = useState(false);
+  const [lowStockDismissed, setLowStockDismissed] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,6 +51,13 @@ export default function BillingScreen() {
   }, [items, search]);
 
   const totals = useMemo(() => totalsForLines(cart), [cart]);
+  const discountAmount = useMemo(
+    () => resolveDiscountAmount(totals.grandTotal, discountType, Number(discountValue) || 0),
+    [totals.grandTotal, discountType, discountValue],
+  );
+  const payableTotal = round2(totals.grandTotal - discountAmount);
+
+  const lowStockItems = useMemo(() => items.filter((i) => i.stock <= LOW_STOCK_THRESHOLD), [items]);
 
   function addToCart(item: Item) {
     if (item.stock <= 0) return;
@@ -151,12 +163,16 @@ export default function BillingScreen() {
     setCustomerPhone('');
     setCustomerGstin('');
     setPaymentMode('cash');
+    setDiscountType('flat');
+    setDiscountValue('');
+    setMobileCartOpen(false);
   }
 
   async function completeBill() {
     if (cart.length === 0 || !settings) return;
     const billNo = await nextBillNumber();
-    const { subtotal, totalCgst, totalSgst, grandTotal } = totalsForLines(cart);
+    const { subtotal, totalCgst, totalSgst, grandTotal: preDiscountTotal } = totalsForLines(cart);
+    const discountAmt = resolveDiscountAmount(preDiscountTotal, discountType, Number(discountValue) || 0);
     const bill: Bill = {
       id: crypto.randomUUID(),
       billNo,
@@ -165,7 +181,10 @@ export default function BillingScreen() {
       subtotal,
       totalCgst,
       totalSgst,
-      grandTotal,
+      discountType: discountAmt > 0 ? discountType : undefined,
+      discountValue: discountAmt > 0 ? Number(discountValue) || 0 : undefined,
+      discountAmount: discountAmt,
+      grandTotal: round2(preDiscountTotal - discountAmt),
       paymentMode,
       customerName: customerName || undefined,
       customerPhone: customerPhone || undefined,
@@ -255,13 +274,36 @@ export default function BillingScreen() {
     <div className="billing-screen">
       <header className="billing-header">
         <h1>{settings.storeName}</h1>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn-ghost" onClick={() => setShowDashboard(true)}>Dashboard</button>
-          <button className="btn-ghost" onClick={() => setShowLedger(true)}>Customers</button>
-          <button className="btn-ghost" onClick={() => setShowSupplies(true)}>Supplies</button>
-          <button className="btn-ghost" onClick={() => setShowSettings(true)}>Settings</button>
-        </div>
+        <nav className="billing-nav">
+          <button className="btn-ghost nav-btn" onClick={() => setShowDashboard(true)}>
+            <span className="nav-btn-icon">📊</span> Dashboard
+            {lowStockItems.length > 0 && <span className="nav-badge">{lowStockItems.length}</span>}
+          </button>
+          <button className="btn-ghost nav-btn" onClick={() => setShowLedger(true)}>
+            <span className="nav-btn-icon">👥</span> Customers
+          </button>
+          <button className="btn-ghost nav-btn" onClick={() => setShowSupplies(true)}>
+            <span className="nav-btn-icon">📦</span> Supplies
+          </button>
+          <button className="btn-ghost nav-btn" onClick={() => setShowSettings(true)}>
+            <span className="nav-btn-icon">⚙️</span> Settings
+          </button>
+        </nav>
       </header>
+
+      {lowStockItems.length > 0 && !lowStockDismissed && (
+        <div className="low-stock-banner">
+          <span className="low-stock-banner-text">
+            ⚠ <strong>{lowStockItems.length}</strong> item{lowStockItems.length === 1 ? '' : 's'} low or out of stock —{' '}
+            {lowStockItems.slice(0, 4).map((i) => i.name).join(', ')}
+            {lowStockItems.length > 4 ? `, +${lowStockItems.length - 4} more` : ''}
+          </span>
+          <div className="low-stock-banner-actions">
+            <button className="low-stock-view-btn" onClick={() => setShowDashboard(true)}>View</button>
+            <button className="low-stock-dismiss-btn" onClick={() => setLowStockDismissed(true)} title="Dismiss">×</button>
+          </div>
+        </div>
+      )}
 
       <div className="billing-main">
         <div className="billing-items-pane">
@@ -274,46 +316,50 @@ export default function BillingScreen() {
               onKeyDown={handleSearchKeyDown}
             />
             <button className="btn-scan" onClick={() => setShowScanner(true)} title="Scan with camera">
-              📷 Scan
+              📷 <span className="btn-scan-label">Scan</span>
             </button>
           </div>
           <div className="item-grid">
-            {filtered.map((item) => (
-              <div key={item.id} className="item-card-wrap" style={{ position: 'relative' }}>
-                <button
-                  className="item-card"
-                  onClick={() => addToCart(item)}
-                  disabled={item.stock <= 0}
-                >
-                  <span className="item-name">{item.name}</span>
-                  <span className="item-price">
-                    {formatINR(item.mrpInclusive ? (item.mrp ?? item.price) : item.price)} · {item.gstRate}% GST
-                    {item.mrpInclusive && <span className="mrp-badge"> incl.</span>}
-                  </span>
-                  <span className="item-stock">{item.stock > 0 ? `${item.stock} ${item.unit} left` : 'Out of stock'}</span>
-                </button>
-                <button
-                  className="item-edit-btn"
-                  title="Edit item (price, GST, HSN…)"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditingItem(item);
-                  }}
-                  style={{
-                    position: 'absolute', top: 4, right: 4, border: 'none', background: 'rgba(255,255,255,0.9)',
-                    borderRadius: 6, width: 24, height: 24, fontSize: 12, cursor: 'pointer', lineHeight: '24px', padding: 0,
-                  }}
-                >
-                  ✎
-                </button>
-              </div>
-            ))}
+            {filtered.map((item) => {
+              const isLow = item.stock > 0 && item.stock <= LOW_STOCK_THRESHOLD;
+              return (
+                <div key={item.id} className="item-card-wrap">
+                  <button
+                    className="item-card"
+                    onClick={() => addToCart(item)}
+                    disabled={item.stock <= 0}
+                  >
+                    <span className="item-name">{item.name}</span>
+                    <span className="item-price">
+                      {formatINR(item.mrpInclusive ? (item.mrp ?? item.price) : item.price)} · {item.gstRate}% GST
+                      {item.mrpInclusive && <span className="mrp-badge"> incl.</span>}
+                    </span>
+                    <span className={`item-stock ${isLow ? 'item-stock-low' : ''} ${item.stock <= 0 ? 'item-stock-out' : ''}`}>
+                      {item.stock > 0 ? `${item.stock} ${item.unit} left` : 'Out of stock'}
+                    </span>
+                  </button>
+                  <button
+                    className="item-edit-btn"
+                    title="Edit item (price, GST, HSN…)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingItem(item);
+                    }}
+                  >
+                    ✎
+                  </button>
+                </div>
+              );
+            })}
             {filtered.length === 0 && <p className="empty-hint">No items match.</p>}
           </div>
         </div>
 
-        <div className="billing-cart-pane">
-          <h2>Bill</h2>
+        <div className={`billing-cart-pane ${mobileCartOpen ? 'mobile-open' : ''}`}>
+          <div className="cart-pane-header">
+            <button className="mobile-cart-back" onClick={() => setMobileCartOpen(false)} aria-label="Back to items">‹</button>
+            <h2>Bill{cart.length > 0 ? ` (${cart.length})` : ''}</h2>
+          </div>
           <div className="cart-lines">
             {cart.length === 0 && <p className="empty-hint">Tap items to add them here.</p>}
             {cart.map((line) => (
@@ -371,11 +417,30 @@ export default function BillingScreen() {
             ))}
           </div>
 
+          <div className="discount-row">
+            <span className="discount-label">Discount</span>
+            <div className="discount-toggle">
+              <button type="button" className={discountType === 'flat' ? 'active' : ''} onClick={() => setDiscountType('flat')}>₹</button>
+              <button type="button" className={discountType === 'percent' ? 'active' : ''} onClick={() => setDiscountType('percent')}>%</button>
+            </div>
+            <input
+              type="number"
+              min={0}
+              inputMode="decimal"
+              placeholder="0"
+              value={discountValue}
+              onChange={(e) => setDiscountValue(e.target.value)}
+            />
+          </div>
+
           <div className="cart-totals">
             <div className="cart-row"><span>Subtotal</span><span>{formatINR(totals.subtotal)}</span></div>
             <div className="cart-row"><span>CGST</span><span>{formatINR(totals.totalCgst)}</span></div>
             <div className="cart-row"><span>SGST</span><span>{formatINR(totals.totalSgst)}</span></div>
-            <div className="cart-row cart-grand"><span>Total</span><span>{formatINR(totals.grandTotal)}</span></div>
+            {discountAmount > 0 && (
+              <div className="cart-row cart-row-discount"><span>Discount</span><span>−{formatINR(discountAmount)}</span></div>
+            )}
+            <div className="cart-row cart-grand"><span>Total</span><span>{formatINR(payableTotal)}</span></div>
           </div>
 
           <div className="cart-actions">
@@ -384,6 +449,14 @@ export default function BillingScreen() {
           </div>
         </div>
       </div>
+
+      {cart.length > 0 && !mobileCartOpen && (
+        <button className="mobile-cart-bar" onClick={() => setMobileCartOpen(true)}>
+          <span>🛒 {cart.length} item{cart.length === 1 ? '' : 's'}</span>
+          <span className="mobile-cart-bar-total">{formatINR(payableTotal)}</span>
+          <span className="mobile-cart-bar-cta">View Bill ›</span>
+        </button>
+      )}
 
       {lastBill && (
         <div className="receipt-modal">

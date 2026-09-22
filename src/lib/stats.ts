@@ -15,7 +15,7 @@ function isSameDay(a: Date, b: Date) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-const LOW_STOCK_THRESHOLD = 10;
+export const LOW_STOCK_THRESHOLD = 10;
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   const [bills, items] = await Promise.all([getAllBills(), getItems()]);

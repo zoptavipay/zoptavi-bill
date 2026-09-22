@@ -85,6 +85,12 @@ export default function Receipt({ bill, settings }: ReceiptProps) {
         <div className="receipt-row"><span>Subtotal</span><span>{formatINR(bill.subtotal)}</span></div>
         <div className="receipt-row"><span>CGST</span><span>{formatINR(bill.totalCgst)}</span></div>
         <div className="receipt-row"><span>SGST</span><span>{formatINR(bill.totalSgst)}</span></div>
+        {bill.discountAmount > 0 && (
+          <div className="receipt-row">
+            <span>Discount{bill.discountType === 'percent' ? ` (${bill.discountValue}%)` : ''}</span>
+            <span>−{formatINR(bill.discountAmount)}</span>
+          </div>
+        )}
         <div className="receipt-row receipt-grand"><span>Grand Total</span><span>{formatINR(bill.grandTotal)}</span></div>
         <div className="receipt-row"><span>Payment</span><span>{bill.paymentMode.toUpperCase()}</span></div>
       </div>

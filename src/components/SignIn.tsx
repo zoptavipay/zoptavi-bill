@@ -90,13 +90,16 @@ export default function SignIn({ onSignedIn }: SignInProps) {
         });
         if (buttonRef.current) {
           buttonRef.current.innerHTML = '';
+          // Cap at 320 (Google's max) but shrink to fit narrow phone screens instead of
+          // overflowing the card — offsetWidth reflects the card's actual available width.
+          const width = Math.max(220, Math.min(320, buttonRef.current.offsetWidth || 320));
           window.google.accounts.id.renderButton(buttonRef.current, {
             type: 'standard',
             theme: 'outline',
             size: 'large',
             text: 'signin_with',
             shape: 'pill',
-            width: 320,
+            width,
           });
         }
         setStatus('ready');

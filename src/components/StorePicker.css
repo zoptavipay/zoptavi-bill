@@ -16,16 +16,17 @@
   align-items: flex-start;
   gap: 2px;
   text-align: left;
-  padding: 12px 14px;
-  border: 1px solid #ddd;
-  border-radius: 9px;
-  background: #fff;
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
   cursor: pointer;
   font-size: 13.5px;
 }
 
-.store-list-item:hover { border-color: #1a1a1a; }
+.store-list-item:hover { border-color: var(--color-ink); }
 
-.store-list-item span { font-size: 12px; color: #777; }
+.store-list-item span { font-size: 12px; color: var(--color-muted); }
 
 .store-add-btn { width: 100%; }

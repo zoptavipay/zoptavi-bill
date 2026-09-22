@@ -4,6 +4,43 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Design tokens — shared across every component's CSS file */
+  --color-ink: #1a1a1a;
+  --color-ink-soft: #444;
+  --color-muted: #767672;
+  --color-faint: #9a9a95;
+  --color-bg: #f4f4f2;
+  --color-surface: #fff;
+  --color-surface-alt: #f7f6f2;
+  --color-border: #e6e5e0;
+  --color-border-strong: #d8d7d1;
+  --color-accent: #c9a24b;
+  --color-accent-dark: #a3812f;
+  --color-danger: #c0392b;
+  --color-danger-bg: #fdecea;
+  --color-danger-border: #f5c2bd;
+  --color-success: #2e7d4f;
+  --color-warning: #b8860b;
+  --color-warning-bg: #fff8e6;
+  --color-warning-border: #f0dca0;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
+
+  --tap-target: 40px;
+  --transition-fast: 120ms ease;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -13,8 +50,46 @@ html, body, #root {
   padding: 0;
   height: 100%;
   width: 100%;
+  overflow-x: hidden;
 }
 
 body {
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink);
+}
+
+button, input, select, textarea {
+  font-family: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+input, select, textarea {
+  font-size: 16px; /* prevents iOS Safari auto-zoom on focus */
+}
+
+@media (min-width: 720px) {
+  input, select, textarea {
+    font-size: inherit;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }

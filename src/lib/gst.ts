@@ -49,6 +49,20 @@ export function totalsForLines(lines: BillLine[]) {
   return { subtotal, totalCgst, totalSgst, grandTotal };
 }
 
+/**
+ * Resolves a shop-entered discount (flat ₹ or %) against the pre-discount bill total into an
+ * actual ₹ amount, clamped so a bill can never go negative (e.g. a stray "150% off").
+ */
+export function resolveDiscountAmount(
+  preDiscountTotal: number,
+  discountType: 'flat' | 'percent',
+  discountValue: number,
+): number {
+  if (!discountValue || discountValue <= 0) return 0;
+  const raw = discountType === 'percent' ? (preDiscountTotal * discountValue) / 100 : discountValue;
+  return round2(Math.min(Math.max(raw, 0), preDiscountTotal));
+}
+
 /** Groups bill lines by GST rate for the invoice's tax-rate summary table. */
 export function gstSummaryByRate(lines: BillLine[]) {
   const map = new Map<number, { rate: number; taxable: number; cgst: number; sgst: number }>();

@@ -34,6 +34,13 @@ export default function SuppliesOrder({ settings, onClose }: SuppliesOrderProps)
     window.open(waUrl, '_blank');
   }
 
+  function emailOrder() {
+    const summary = lines.map((l) => `${l.qty} × ${l.label}`).join('\n');
+    const body = `New supply order request\nStore: ${settings.storeName}${settings.phone ? ` (${settings.phone})` : ''}\n\n${summary}\n\n— sent from Zoptavi Tab`;
+    const mailUrl = `mailto:support@zoptavi.com?subject=${encodeURIComponent('Supply order request')}&body=${encodeURIComponent(body)}`;
+    window.location.href = mailUrl;
+  }
+
   return (
     <div className="receipt-modal">
       <div className="receipt-modal-inner ledger-modal">
@@ -76,6 +83,9 @@ export default function SuppliesOrder({ settings, onClose }: SuppliesOrderProps)
 
         <div className="receipt-modal-actions">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-ghost" disabled={lines.length === 0} onClick={emailOrder}>
+            Email us instead
+          </button>
           <button className="btn-solid" disabled={lines.length === 0} onClick={sendOrder}>
             Send order via WhatsApp
           </button>

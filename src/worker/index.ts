@@ -1,6 +1,11 @@
-import type { BillRow, Env, ItemRow, Owner, Store } from "./types.ts";
+import type { BillRow, Env, ItemRow, Owner, SessionPayload, Store } from "./types.ts";
 import { GoogleTokenVerificationError, verifyGoogleIdToken } from "./googleAuth.ts";
-import { createSessionToken, getSessionFromRequest } from "./session.ts";
+import {
+  createSessionToken,
+  createWorkerSessionToken,
+  getSessionFromRequest,
+  isWorkerSession,
+} from "./session.ts";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -23,6 +28,51 @@ const STORE_FIELDS = [
 ] as const;
 type StoreField = (typeof STORE_FIELDS)[number];
 
+const WORKER_PIN_PATTERN = /^\d{6}$/;
+const WORKER_PIN_MAX_ATTEMPTS = 5;
+const WORKER_PIN_LOCKOUT_MINUTES = 15;
+// Excludes visually-ambiguous characters (0/O, 1/I) so a worker copying the code by hand
+// off a printed slip doesn't misread it.
+const STORE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function generateStoreCode(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  let code = "";
+  for (const b of bytes) code += STORE_CODE_ALPHABET[b % STORE_CODE_ALPHABET.length];
+  return code;
+}
+
+async function hashPin(pin: string, storeId: string): Promise<string> {
+  const data = new TextEncoder().encode(`${storeId}:${pin}`);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Assigns a fresh, unique store_code to a store that doesn't have one yet (either just
+ * created, or created before this feature existed) — retries on the astronomically unlikely
+ * unique-index collision. */
+async function assignStoreCode(env: Env, storeId: string): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateStoreCode();
+    try {
+      await env.DB.prepare("UPDATE stores SET store_code = ? WHERE id = ?").bind(code, storeId).run();
+      return code;
+    } catch {
+      // unique constraint hit — try another code
+    }
+  }
+  throw new Error("Could not assign a unique store code");
+}
+
+/** Strips security-sensitive columns before a Store row ever reaches the client, replacing
+ * the PIN hash with a plain boolean the Settings UI can use to show "PIN set" vs not. */
+function sanitizeStore(store: Store) {
+  const { worker_pin_hash, worker_pin_fail_count: _fail, worker_pin_locked_until: _locked, ...rest } = store;
+  return { ...rest, worker_pin_set: !!worker_pin_hash };
+}
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -34,6 +84,14 @@ export default {
     try {
       if (url.pathname === "/api/auth/google" && request.method === "POST") {
         return await handleGoogleAuth(request, env);
+      }
+
+      if (url.pathname === "/api/auth/worker-pin" && request.method === "POST") {
+        return await handleWorkerPinAuth(request, env);
+      }
+
+      if (url.pathname === "/api/owner/overview" && request.method === "GET") {
+        return await handleOwnerOverview(request, env);
       }
 
       if (url.pathname === "/api/stores" && request.method === "GET") {
@@ -145,20 +203,135 @@ async function upsertOwner(
   return created;
 }
 
-async function handleListStores(request: Request, env: Env): Promise<Response> {
+async function handleWorkerPinAuth(request: Request, env: Env): Promise<Response> {
+  let body: { storeCode?: unknown; pin?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "Invalid JSON body");
+  }
+
+  if (typeof body.storeCode !== "string" || typeof body.pin !== "string") {
+    return errorResponse(400, "Store code and PIN are required");
+  }
+
+  const storeCode = body.storeCode.trim().toUpperCase();
+  const pin = body.pin.trim();
+
+  const store = await env.DB.prepare("SELECT * FROM stores WHERE store_code = ?")
+    .bind(storeCode)
+    .first<Store>();
+  if (!store || !store.worker_pin_hash) {
+    return errorResponse(401, "Invalid store code or PIN");
+  }
+
+  if (store.worker_pin_locked_until && store.worker_pin_locked_until > new Date().toISOString()) {
+    return errorResponse(429, "Too many attempts — try again in a few minutes.");
+  }
+
+  const candidateHash = await hashPin(pin, store.id);
+  if (candidateHash !== store.worker_pin_hash) {
+    const failCount = (store.worker_pin_fail_count ?? 0) + 1;
+    const lockedUntil =
+      failCount >= WORKER_PIN_MAX_ATTEMPTS
+        ? new Date(Date.now() + WORKER_PIN_LOCKOUT_MINUTES * 60 * 1000).toISOString()
+        : null;
+    await env.DB.prepare(
+      "UPDATE stores SET worker_pin_fail_count = ?, worker_pin_locked_until = ? WHERE id = ?",
+    )
+      .bind(failCount, lockedUntil, store.id)
+      .run();
+    return errorResponse(401, "Invalid store code or PIN");
+  }
+
+  await env.DB.prepare(
+    "UPDATE stores SET worker_pin_fail_count = 0, worker_pin_locked_until = NULL WHERE id = ?",
+  )
+    .bind(store.id)
+    .run();
+
+  const token = await createWorkerSessionToken(store.id, env.SESSION_SECRET);
+  return jsonResponse({ token, store: sanitizeStore(store) });
+}
+
+/** Cross-store summary for the signed-in owner: per-store stock/low-stock/sales, so an owner
+ * with several stores can see them all at a glance without picking one to bill from. Reads
+ * D1 directly (not the per-device IndexedDB cache) since it's meant to work from any device. */
+async function handleOwnerOverview(request: Request, env: Env): Promise<Response> {
   const session = await getSessionFromRequest(request, env.SESSION_SECRET);
-  if (!session) return errorResponse(401, "Unauthorized");
+  if (!session || isWorkerSession(session)) return errorResponse(401, "Unauthorized");
 
   const { results } = await env.DB.prepare("SELECT * FROM stores WHERE owner_id = ?")
     .bind(session.owner_id)
     .all<Store>();
+  const stores = results ?? [];
 
-  return jsonResponse(results ?? []);
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const overview = await Promise.all(
+    stores.map(async (store) => {
+      const itemStats = await env.DB.prepare(
+        `SELECT COUNT(*) as itemCount,
+                SUM(CASE WHEN stock <= 10 THEN 1 ELSE 0 END) as lowStockCount,
+                COALESCE(SUM(price * stock), 0) as stockValue
+         FROM items WHERE store_id = ? AND deleted = 0`,
+      )
+        .bind(store.id)
+        .first<{ itemCount: number; lowStockCount: number; stockValue: number }>();
+
+      const todaySales = await env.DB.prepare(
+        "SELECT COALESCE(SUM(grand_total), 0) as total, COUNT(*) as count FROM bills WHERE store_id = ? AND created_at >= ?",
+      )
+        .bind(store.id, todayStart)
+        .first<{ total: number; count: number }>();
+
+      const weekSales = await env.DB.prepare(
+        "SELECT COALESCE(SUM(grand_total), 0) as total FROM bills WHERE store_id = ? AND created_at >= ?",
+      )
+        .bind(store.id, weekAgo)
+        .first<{ total: number }>();
+
+      return {
+        storeId: store.id,
+        storeName: store.store_name,
+        itemCount: itemStats?.itemCount ?? 0,
+        lowStockCount: itemStats?.lowStockCount ?? 0,
+        stockValue: itemStats?.stockValue ?? 0,
+        todaySales: todaySales?.total ?? 0,
+        todayBillCount: todaySales?.count ?? 0,
+        weekSales: weekSales?.total ?? 0,
+      };
+    }),
+  );
+
+  return jsonResponse({ stores: overview });
+}
+
+async function handleListStores(request: Request, env: Env): Promise<Response> {
+  const session = await getSessionFromRequest(request, env.SESSION_SECRET);
+  if (!session || isWorkerSession(session)) return errorResponse(401, "Unauthorized");
+
+  const { results } = await env.DB.prepare("SELECT * FROM stores WHERE owner_id = ?")
+    .bind(session.owner_id)
+    .all<Store>();
+  const stores = results ?? [];
+
+  // Backfill a store_code for any store created before this feature existed, so every
+  // store the owner can see always has one to hand to a worker.
+  for (const store of stores) {
+    if (!store.store_code) {
+      store.store_code = await assignStoreCode(env, store.id);
+    }
+  }
+
+  return jsonResponse(stores.map(sanitizeStore));
 }
 
 async function handleCreateStore(request: Request, env: Env): Promise<Response> {
   const session = await getSessionFromRequest(request, env.SESSION_SECRET);
-  if (!session) return errorResponse(401, "Unauthorized");
+  if (!session || isWorkerSession(session)) return errorResponse(401, "Unauthorized");
 
   let body: Record<string, unknown>;
   try {
@@ -200,14 +373,19 @@ async function handleCreateStore(request: Request, env: Env): Promise<Response> 
     )
     .run();
 
+  await assignStoreCode(env, id);
+
   const created = await env.DB.prepare("SELECT * FROM stores WHERE id = ?").bind(id).first<Store>();
   if (!created) return errorResponse(500, "Failed to create store");
-  return jsonResponse(created, 201);
+  return jsonResponse(sanitizeStore(created), 201);
 }
 
 async function handleUpdateStore(request: Request, env: Env, storeId: string): Promise<Response> {
   const session = await getSessionFromRequest(request, env.SESSION_SECRET);
   if (!session) return errorResponse(401, "Unauthorized");
+  // Workers can bill and manage stock, but never touch store identity/settings or their own
+  // PIN — only the owner (Google session) can reach this route.
+  if (isWorkerSession(session)) return errorResponse(403, "Forbidden");
 
   const existing = await env.DB.prepare("SELECT * FROM stores WHERE id = ?")
     .bind(storeId)
@@ -223,7 +401,7 @@ async function handleUpdateStore(request: Request, env: Env, storeId: string): P
   }
 
   const updates: string[] = [];
-  const bindings: (string | null)[] = [];
+  const bindings: (string | null | number)[] = [];
   for (const field of STORE_FIELDS) {
     if (field in body) {
       const value = body[field];
@@ -235,8 +413,24 @@ async function handleUpdateStore(request: Request, env: Env, storeId: string): P
     }
   }
 
+  // worker_pin is handled separately from the generic STORE_FIELDS loop: it's never stored
+  // as-is, only its hash — and clearing it (null/empty) disables worker access entirely.
+  if ("worker_pin" in body) {
+    const raw = body.worker_pin;
+    if (raw === null || raw === "") {
+      updates.push("worker_pin_hash = ?", "worker_pin_fail_count = 0", "worker_pin_locked_until = NULL");
+      bindings.push(null);
+    } else if (typeof raw === "string" && WORKER_PIN_PATTERN.test(raw)) {
+      const hash = await hashPin(raw, storeId);
+      updates.push("worker_pin_hash = ?", "worker_pin_fail_count = 0", "worker_pin_locked_until = NULL");
+      bindings.push(hash);
+    } else {
+      return errorResponse(400, "worker_pin must be exactly 6 digits");
+    }
+  }
+
   if (updates.length === 0) {
-    return jsonResponse(existing);
+    return jsonResponse(sanitizeStore(existing));
   }
 
   updates.push("updated_at = datetime('now')");
@@ -250,7 +444,8 @@ async function handleUpdateStore(request: Request, env: Env, storeId: string): P
     .bind(storeId)
     .first<Store>();
   if (!updated) return errorResponse(500, "Failed to update store");
-  return jsonResponse(updated);
+  if (!updated.store_code) updated.store_code = await assignStoreCode(env, storeId);
+  return jsonResponse(sanitizeStore(updated));
 }
 
 /** Frontend camelCase Item shape, as sent/received on /api/sync. */
@@ -266,6 +461,7 @@ interface SyncItem {
   barcode?: string;
   mrpInclusive?: boolean;
   mrp?: number;
+  addedBy?: string;
 }
 
 /** Frontend camelCase Bill shape, as sent/received on /api/sync. */
@@ -298,6 +494,7 @@ function itemRowToSyncItem(row: ItemRow): SyncItem {
     barcode: row.barcode ?? undefined,
     mrpInclusive: !!row.mrp_inclusive,
     mrp: row.mrp ?? undefined,
+    addedBy: row.added_by ?? undefined,
   };
 }
 
@@ -319,15 +516,21 @@ function billRowToSyncBill(row: BillRow): SyncBill {
   };
 }
 
-/** Verifies the session token AND that its owner actually owns `storeId`. Returns null (and has
- * already sent an appropriate error) on failure, otherwise the verified owner_id. */
-async function requireStoreOwnership(
+/** Verifies the session token grants access to `storeId` — either the owner of that store
+ * (Google session), or a worker session scoped to exactly that store (PIN sign-in). Returns
+ * the Response to send back on failure, otherwise the verified session. */
+async function requireStoreAccess(
   request: Request,
   env: Env,
   storeId: string,
-): Promise<{ ownerId: string } | Response> {
+): Promise<{ session: SessionPayload } | Response> {
   const session = await getSessionFromRequest(request, env.SESSION_SECRET);
   if (!session) return errorResponse(401, "Unauthorized");
+
+  if (isWorkerSession(session)) {
+    if (session.store_id !== storeId) return errorResponse(403, "Forbidden");
+    return { session };
+  }
 
   const store = await env.DB.prepare("SELECT * FROM stores WHERE id = ?")
     .bind(storeId)
@@ -335,12 +538,12 @@ async function requireStoreOwnership(
   if (!store) return errorResponse(404, "Store not found");
   if (store.owner_id !== session.owner_id) return errorResponse(403, "Forbidden");
 
-  return { ownerId: session.owner_id };
+  return { session };
 }
 
 async function handleSyncPush(request: Request, env: Env, storeId: string): Promise<Response> {
-  const ownership = await requireStoreOwnership(request, env, storeId);
-  if (ownership instanceof Response) return ownership;
+  const access = await requireStoreAccess(request, env, storeId);
+  if (access instanceof Response) return access;
 
   let body: { items?: SyncItem[]; bills?: SyncBill[] };
   try {
@@ -358,12 +561,13 @@ async function handleSyncPush(request: Request, env: Env, storeId: string): Prom
   // guard below, this means "last device to sync wins" for a given row — acceptable for the
   // small/single-device-per-store scale this app targets in v1.
   const itemStmt = env.DB.prepare(
-    `INSERT INTO items (id, store_id, name, hsn, price, gst_rate, unit, stock, category, barcode, mrp_inclusive, mrp, updated_at, deleted)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `INSERT INTO items (id, store_id, name, hsn, price, gst_rate, unit, stock, category, barcode, mrp_inclusive, mrp, added_by, updated_at, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
      ON CONFLICT(store_id, id) DO UPDATE SET
        name = excluded.name, hsn = excluded.hsn, price = excluded.price, gst_rate = excluded.gst_rate,
        unit = excluded.unit, stock = excluded.stock, category = excluded.category, barcode = excluded.barcode,
-       mrp_inclusive = excluded.mrp_inclusive, mrp = excluded.mrp, updated_at = excluded.updated_at
+       mrp_inclusive = excluded.mrp_inclusive, mrp = excluded.mrp,
+       added_by = COALESCE(items.added_by, excluded.added_by), updated_at = excluded.updated_at
      WHERE excluded.updated_at > items.updated_at`,
   );
   const billStmt = env.DB.prepare(
@@ -391,6 +595,7 @@ async function handleSyncPush(request: Request, env: Env, storeId: string): Prom
       it.barcode ?? null,
       it.mrpInclusive ? 1 : 0,
       it.mrp ?? null,
+      it.addedBy ?? null,
       now,
     ),
   );
@@ -430,8 +635,8 @@ async function handleSyncPush(request: Request, env: Env, storeId: string): Prom
 }
 
 async function handleSyncPull(request: Request, env: Env, storeId: string): Promise<Response> {
-  const ownership = await requireStoreOwnership(request, env, storeId);
-  if (ownership instanceof Response) return ownership;
+  const access = await requireStoreAccess(request, env, storeId);
+  if (access instanceof Response) return access;
 
   const url = new URL(request.url);
   const since = url.searchParams.get("since") ?? "";

@@ -6,10 +6,12 @@ import { syncNow } from '../lib/sync';
 import { buildBillPdf, billPdfFileName } from '../lib/pdf';
 import { lookupBarcodeOnline } from '../lib/barcodeLookup';
 import { LOW_STOCK_THRESHOLD } from '../lib/stats';
+import { getOwner, getRole, getActiveStoreId, fetchStores, updateStore, updateStorePin, signOut } from '../lib/auth';
 import Receipt from './Receipt';
 import BarcodeScanner from './BarcodeScanner';
 import CustomerLedger from './CustomerLedger';
 import Dashboard from './Dashboard';
+import OwnerOverview from './OwnerOverview';
 import BusinessSetup from './BusinessSetup';
 import SuppliesOrder from './SuppliesOrder';
 import './BillingScreen.css';
@@ -29,10 +31,14 @@ export default function BillingScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [newItemBarcode, setNewItemBarcode] = useState<string | null>(null);
+  const [showAddItem, setShowAddItem] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState('all');
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showLedger, setShowLedger] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
   const [showSupplies, setShowSupplies] = useState(false);
+  const [showOwnerOverview, setShowOwnerOverview] = useState(false);
+  const role = getRole();
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
   const [lowStockDismissed, setLowStockDismissed] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
@@ -42,13 +48,20 @@ export default function BillingScreen() {
     getSettings().then(setSettings);
   }, []);
 
+  const categories = useMemo(() => {
+    const set = new Set(items.map((i) => i.category).filter((c): c is string => !!c));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [items]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
-      (i) => i.name.toLowerCase().includes(q) || i.hsn.includes(q) || (i.barcode ?? '').includes(q),
-    );
-  }, [items, search]);
+    return items.filter((i) => {
+      const matchesSearch =
+        !q || i.name.toLowerCase().includes(q) || i.hsn.includes(q) || (i.barcode ?? '').includes(q);
+      const matchesCategory = categoryFilter === 'all' || i.category === categoryFilter;
+      return matchesSearch && matchesCategory;
+    });
+  }, [items, search, categoryFilter]);
 
   const totals = useMemo(() => totalsForLines(cart), [cart]);
   const discountAmount = useMemo(
@@ -133,12 +146,16 @@ export default function BillingScreen() {
   }
 
   async function handleNewItemSave(item: Item) {
+    const cameFromScan = newItemBarcode !== null;
     await addItem(item);
     const refreshed = await getItems();
     setItems(refreshed);
     setNewItemBarcode(null);
+    setShowAddItem(false);
     setSearch('');
-    addToCart(item);
+    // Only auto-add to the cart when this came from mid-billing barcode scan/entry — a
+    // deliberate "+ Add item" from inventory management shouldn't silently start a sale.
+    if (cameFromScan) addToCart(item);
   }
 
   async function handleEditItemSave(item: Item) {
@@ -254,6 +271,15 @@ export default function BillingScreen() {
     await saveSettings(next);
     setSettings(next);
     setShowSettings(false);
+    // Best-effort push to the server too, so a rename/address change here is reflected the
+    // next time this store is picked from a different device, in the worker sign-in
+    // response, or in the owner's cross-store overview — never blocks the local save.
+    const storeId = getActiveStoreId();
+    if (storeId) {
+      updateStore(storeId, next).catch(() => {
+        // offline or request failed — local billing keeps working regardless
+      });
+    }
   }
 
   if (!settings) return <div className="billing-loading">Loading…</div>;
@@ -285,8 +311,25 @@ export default function BillingScreen() {
           <button className="btn-ghost nav-btn" onClick={() => setShowSupplies(true)}>
             <span className="nav-btn-icon">📦</span> Supplies
           </button>
-          <button className="btn-ghost nav-btn" onClick={() => setShowSettings(true)}>
-            <span className="nav-btn-icon">⚙️</span> Settings
+          {role === 'owner' && (
+            <button className="btn-ghost nav-btn" onClick={() => setShowOwnerOverview(true)}>
+              <span className="nav-btn-icon">🏬</span> All Stores
+            </button>
+          )}
+          {role === 'owner' && (
+            <button className="btn-ghost nav-btn" onClick={() => setShowSettings(true)}>
+              <span className="nav-btn-icon">⚙️</span> Settings
+            </button>
+          )}
+          <button
+            className="btn-ghost nav-btn"
+            onClick={async () => {
+              if (!confirm('Sign out of this device? Locally cached data will be cleared.')) return;
+              await signOut();
+              window.location.reload();
+            }}
+          >
+            <span className="nav-btn-icon">⎋</span> Sign out
           </button>
         </nav>
       </header>
@@ -315,10 +358,34 @@ export default function BillingScreen() {
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={handleSearchKeyDown}
             />
+          </div>
+          <div className="action-row">
+            <button className="btn-add-item" onClick={() => setShowAddItem(true)}>
+              + Add item
+            </button>
             <button className="btn-scan" onClick={() => setShowScanner(true)} title="Scan with camera">
               📷 <span className="btn-scan-label">Scan</span>
             </button>
           </div>
+          {categories.length > 0 && (
+            <div className="category-chips">
+              <button
+                className={categoryFilter === 'all' ? 'active' : ''}
+                onClick={() => setCategoryFilter('all')}
+              >
+                All
+              </button>
+              {categories.map((c) => (
+                <button
+                  key={c}
+                  className={categoryFilter === c ? 'active' : ''}
+                  onClick={() => setCategoryFilter(c)}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="item-grid">
             {filtered.map((item) => {
               const isLow = item.stock > 0 && item.stock <= LOW_STOCK_THRESHOLD;
@@ -330,6 +397,7 @@ export default function BillingScreen() {
                     disabled={item.stock <= 0}
                   >
                     <span className="item-name">{item.name}</span>
+                    {item.category && <span className="item-category">{item.category}</span>}
                     <span className="item-price">
                       {formatINR(item.mrpInclusive ? (item.mrp ?? item.price) : item.price)} · {item.gstRate}% GST
                       {item.mrpInclusive && <span className="mrp-badge"> incl.</span>}
@@ -351,7 +419,7 @@ export default function BillingScreen() {
                 </div>
               );
             })}
-            {filtered.length === 0 && <p className="empty-hint">No items match.</p>}
+            {filtered.length === 0 && <p className="empty-hint">No items match{categoryFilter !== 'all' ? ' in this category' : ''}.</p>}
           </div>
         </div>
 
@@ -482,10 +550,14 @@ export default function BillingScreen() {
         <BarcodeScanner onDetected={handleScanned} onClose={() => setShowScanner(false)} />
       )}
 
-      {newItemBarcode !== null && (
+      {(newItemBarcode !== null || showAddItem) && (
         <NewItemModal
-          barcode={newItemBarcode}
-          onCancel={() => setNewItemBarcode(null)}
+          barcode={newItemBarcode ?? undefined}
+          existingCategories={categories}
+          onCancel={() => {
+            setNewItemBarcode(null);
+            setShowAddItem(false);
+          }}
           onSave={handleNewItemSave}
         />
       )}
@@ -493,6 +565,7 @@ export default function BillingScreen() {
       {editingItem && (
         <EditItemModal
           item={editingItem}
+          existingCategories={categories}
           onCancel={() => setEditingItem(null)}
           onSave={handleEditItemSave}
         />
@@ -503,29 +576,36 @@ export default function BillingScreen() {
       {showDashboard && <Dashboard onClose={() => setShowDashboard(false)} />}
 
       {showSupplies && <SuppliesOrder settings={settings} onClose={() => setShowSupplies(false)} />}
+
+      {showOwnerOverview && <OwnerOverview onClose={() => setShowOwnerOverview(false)} />}
     </div>
   );
 }
 
 function NewItemModal({
   barcode,
+  existingCategories,
   onSave,
   onCancel,
 }: {
-  barcode: string;
+  barcode?: string;
+  existingCategories: string[];
   onSave: (item: Item) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState('');
+  const [category, setCategory] = useState('');
   const [priceMode, setPriceMode] = useState<'mrp' | 'exclusive'>('mrp');
   const [price, setPrice] = useState('');
   const [gstRate, setGstRate] = useState('5');
   const [hsn, setHsn] = useState('');
   const [unit, setUnit] = useState('pc');
   const [stock, setStock] = useState('10');
+  const [manualBarcode, setManualBarcode] = useState('');
   const [lookupState, setLookupState] = useState<'looking' | 'found' | 'not-found'>('looking');
 
   useEffect(() => {
+    if (!barcode) return; // manually added item — nothing to look up
     let cancelled = false;
     setLookupState('looking');
     lookupBarcodeOnline(barcode).then((result) => {
@@ -549,17 +629,20 @@ function NewItemModal({
     if (!canSave) return;
     const entered = Number(price);
     const mrpInclusive = priceMode === 'mrp';
+    const owner = getOwner();
     onSave({
       id: crypto.randomUUID(),
       name: name.trim(),
+      category: category.trim() || undefined,
       hsn: hsn.trim() || '0000',
       price: mrpInclusive ? exclusiveFromMrp(entered, Number(gstRate)) : entered,
       gstRate: Number(gstRate),
       unit: unit.trim() || 'pc',
       stock: Number(stock) || 0,
-      barcode,
+      barcode: barcode ?? (manualBarcode.trim() || undefined),
       mrpInclusive,
       mrp: mrpInclusive ? entered : undefined,
+      addedBy: owner?.name || owner?.email || undefined,
     });
   }
 
@@ -567,12 +650,28 @@ function NewItemModal({
     <div className="receipt-modal">
       <div className="receipt-modal-inner settings-form">
         <h2>New item</h2>
-        <p className="empty-hint" style={{ padding: 0, marginBottom: 4 }}>
-          {lookupState === 'looking' && <>Looking up barcode <strong>{barcode}</strong> online…</>}
-          {lookupState === 'found' && <>Found a name from an online product database — check it's right, then fill in price and GST.</>}
-          {lookupState === 'not-found' && <>No item matches barcode <strong>{barcode}</strong> yet, and it wasn't in the public product database either — add it once and it's scannable from now on.</>}
-        </p>
+        {barcode && (
+          <p className="empty-hint" style={{ padding: 0, marginBottom: 4 }}>
+            {lookupState === 'looking' && <>Looking up barcode <strong>{barcode}</strong> online…</>}
+            {lookupState === 'found' && <>Found a name from an online product database — check it's right, then fill in price and GST.</>}
+            {lookupState === 'not-found' && <>No item matches barcode <strong>{barcode}</strong> yet, and it wasn't in the public product database either — add it once and it's scannable from now on.</>}
+          </p>
+        )}
         <label>Name<input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></label>
+        <label>
+          Category
+          <input
+            list="item-category-options"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="e.g. Grocery, Stationery…"
+          />
+          <datalist id="item-category-options">
+            {existingCategories.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        </label>
         <div className="price-mode-toggle">
           <button type="button" className={priceMode === 'mrp' ? 'active' : ''} onClick={() => setPriceMode('mrp')}>MRP (GST included)</button>
           <button type="button" className={priceMode === 'exclusive' ? 'active' : ''} onClick={() => setPriceMode('exclusive')}>Price before GST</button>
@@ -600,9 +699,12 @@ function NewItemModal({
         <label>HSN code (optional)<input value={hsn} onChange={(e) => setHsn(e.target.value)} /></label>
         <label>Unit<input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="pc, kg, ltr…" /></label>
         <label>Opening stock<input type="number" min={0} value={stock} onChange={(e) => setStock(e.target.value)} /></label>
+        {!barcode && (
+          <label>Barcode (optional)<input value={manualBarcode} onChange={(e) => setManualBarcode(e.target.value)} placeholder="Scan or type one in later too" /></label>
+        )}
         <div className="receipt-modal-actions">
           <button className="btn-ghost" onClick={onCancel}>Cancel</button>
-          <button className="btn-solid" onClick={save} disabled={!canSave}>Add &amp; bill it</button>
+          <button className="btn-solid" onClick={save} disabled={!canSave}>{barcode ? 'Add & bill it' : 'Add item'}</button>
         </div>
       </div>
     </div>
@@ -611,14 +713,17 @@ function NewItemModal({
 
 function EditItemModal({
   item,
+  existingCategories,
   onSave,
   onCancel,
 }: {
   item: Item;
+  existingCategories: string[];
   onSave: (item: Item) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(item.name);
+  const [category, setCategory] = useState(item.category ?? '');
   const [priceMode, setPriceMode] = useState<'mrp' | 'exclusive'>(item.mrpInclusive === false ? 'exclusive' : 'mrp');
   const [price, setPrice] = useState(String(item.mrpInclusive ? (item.mrp ?? item.price) : item.price));
   const [gstRate, setGstRate] = useState(String(item.gstRate));
@@ -637,6 +742,7 @@ function EditItemModal({
     onSave({
       ...item,
       name: name.trim(),
+      category: category.trim() || undefined,
       hsn: hsn.trim() || '0000',
       price: mrpInclusive ? exclusiveFromMrp(entered, Number(gstRate)) : entered,
       gstRate: Number(gstRate),
@@ -654,8 +760,23 @@ function EditItemModal({
         <h2>Edit item</h2>
         <p className="empty-hint" style={{ padding: 0, marginBottom: 4 }}>
           Fixes here (price, GST rate, HSN…) apply permanently to this item, not just the current bill.
+          {item.addedBy && <> Added by <strong>{item.addedBy}</strong>.</>}
         </p>
         <label>Name<input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></label>
+        <label>
+          Category
+          <input
+            list="item-category-options-edit"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="e.g. Grocery, Stationery…"
+          />
+          <datalist id="item-category-options-edit">
+            {existingCategories.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        </label>
         <div className="price-mode-toggle">
           <button type="button" className={priceMode === 'mrp' ? 'active' : ''} onClick={() => setPriceMode('mrp')}>MRP (GST included)</button>
           <button type="button" className={priceMode === 'exclusive' ? 'active' : ''} onClick={() => setPriceMode('exclusive')}>Price before GST</button>
@@ -703,6 +824,71 @@ function SettingsModal({
   onCancel: () => void;
 }) {
   const [form, setForm] = useState<StoreSettings>(settings);
+  const [pin, setPin] = useState('');
+  const [pinStatus, setPinStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [loadingWorkerInfo, setLoadingWorkerInfo] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const storeId = getActiveStoreId();
+    if (!storeId) {
+      setLoadingWorkerInfo(false);
+      return;
+    }
+    fetchStores()
+      .then((stores) => {
+        if (cancelled) return;
+        const mine = stores.find((s) => s.id === storeId);
+        if (mine) {
+          setForm((prev) => ({ ...prev, storeCode: mine.store_code ?? undefined, workerPinSet: mine.worker_pin_set }));
+        }
+      })
+      .catch(() => {
+        // offline or request failed — worker-access section just shows what we already have
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingWorkerInfo(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const canSavePin = /^\d{6}$/.test(pin);
+
+  async function savePin() {
+    const storeId = getActiveStoreId();
+    if (!storeId || !canSavePin) return;
+    setPinStatus('saving');
+    setPinError(null);
+    try {
+      const updated = await updateStorePin(storeId, pin);
+      setForm((prev) => ({ ...prev, storeCode: updated.store_code ?? undefined, workerPinSet: updated.worker_pin_set }));
+      setPin('');
+      setPinStatus('saved');
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Could not save the PIN.');
+      setPinStatus('error');
+    }
+  }
+
+  async function removePin() {
+    const storeId = getActiveStoreId();
+    if (!storeId) return;
+    if (!confirm('Turn off worker PIN access for this store?')) return;
+    setPinStatus('saving');
+    setPinError(null);
+    try {
+      const updated = await updateStorePin(storeId, '');
+      setForm((prev) => ({ ...prev, storeCode: updated.store_code ?? undefined, workerPinSet: updated.worker_pin_set }));
+      setPinStatus('idle');
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Could not update.');
+      setPinStatus('error');
+    }
+  }
+
   return (
     <div className="receipt-modal">
       <div className="receipt-modal-inner settings-form">
@@ -728,6 +914,49 @@ function SettingsModal({
             <option value="a4">A4 / browser print</option>
           </select>
         </label>
+
+        <div className="settings-section-title">Worker access</div>
+        {loadingWorkerInfo ? (
+          <p className="empty-hint" style={{ padding: 0 }}>Loading…</p>
+        ) : form.storeCode ? (
+          <>
+            <p className="empty-hint" style={{ padding: 0, marginBottom: 4 }}>
+              Give a worker this store code and a PIN to let them bill on this store without a
+              Google account — they pick "Worker (PIN)" on the sign-in screen.
+            </p>
+            <div className="store-code-display">
+              Store code: <strong>{form.storeCode}</strong>
+            </div>
+            <p className="empty-hint" style={{ padding: 0, marginBottom: 4 }}>
+              {form.workerPinSet ? 'A PIN is set.' : 'No PIN set yet — workers can’t sign in until you set one.'}
+            </p>
+            <div className="worker-pin-row">
+              <input
+                type="password"
+                inputMode="numeric"
+                maxLength={6}
+                value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+                placeholder="New 6-digit PIN"
+              />
+              <button type="button" className="btn-ghost" disabled={!canSavePin || pinStatus === 'saving'} onClick={savePin}>
+                {form.workerPinSet ? 'Change PIN' : 'Set PIN'}
+              </button>
+            </div>
+            {form.workerPinSet && (
+              <button type="button" className="worker-pin-remove" onClick={removePin} disabled={pinStatus === 'saving'}>
+                Turn off worker access
+              </button>
+            )}
+            {pinStatus === 'saved' && <p className="empty-hint" style={{ padding: 0, color: 'var(--color-success)' }}>Saved.</p>}
+            {pinStatus === 'error' && pinError && <p className="empty-hint" style={{ padding: 0, color: 'var(--color-danger)' }}>{pinError}</p>}
+          </>
+        ) : (
+          <p className="empty-hint" style={{ padding: 0 }}>
+            Sign in online once to set up worker access for this store.
+          </p>
+        )}
+
         <div className="receipt-modal-actions">
           <button className="btn-ghost" onClick={onCancel}>Cancel</button>
           <button className="btn-solid" onClick={() => onSave(form)}>Save</button>

@@ -1,4 +1,4 @@
-import { get, set, update, createStore, keys, del } from 'idb-keyval';
+import { get, set, update, createStore, keys, del, clear } from 'idb-keyval';
 import type { Bill, Item, StoreSettings } from '../types';
 
 // Dedicated IndexedDB database for Zoptavi Tab (kept isolated from any other
@@ -105,4 +105,11 @@ export async function deleteBill(id: string): Promise<void> {
 export async function getUnsyncedBills(): Promise<Bill[]> {
   const bills = await getAllBills();
   return bills.filter((b) => !b.synced);
+}
+
+/** Wipes every locally-cached item/bill/setting — used on sign-out so a different owner or
+ * worker signing in next on this shared device never sees the previous one's data before the
+ * first sync completes. */
+export async function clearLocalData(): Promise<void> {
+  await clear(store);
 }

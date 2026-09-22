@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
-import { GOOGLE_CLIENT_ID, setSession, signInWithGoogle, type Owner } from '../lib/auth';
+import {
+  GOOGLE_CLIENT_ID,
+  remoteStoreToSettings,
+  setSession,
+  setWorkerSession,
+  signInWithGoogle,
+  signInWithPin,
+} from '../lib/auth';
+import { saveSettings } from '../lib/db';
 import './SignIn.css';
 
 interface SignInProps {
-  onSignedIn: (owner: Owner) => void;
+  /** Tells the caller which phase to move to next — owner sign-in still needs to pick a
+   * store, but a worker's store is already fixed by which PIN they used. */
+  onSignedIn: (nextPhase: 'store-picker' | 'app') => void;
 }
 
 // Minimal shape of what we use from Google Identity Services — the full types
@@ -54,6 +64,34 @@ function loadGoogleScript(): Promise<void> {
 }
 
 export default function SignIn({ onSignedIn }: SignInProps) {
+  const [mode, setMode] = useState<'owner' | 'worker'>('owner');
+
+  return (
+    <div className="setup-screen">
+      <div className="setup-card signin-card">
+        <span className="setup-eyebrow">Welcome to Zoptavi Tab</span>
+        <h1>Sign in to get started</h1>
+
+        <div className="price-mode-toggle signin-role-toggle">
+          <button type="button" className={mode === 'owner' ? 'active' : ''} onClick={() => setMode('owner')}>
+            Owner
+          </button>
+          <button type="button" className={mode === 'worker' ? 'active' : ''} onClick={() => setMode('worker')}>
+            Worker (PIN)
+          </button>
+        </div>
+
+        {mode === 'owner' ? (
+          <OwnerSignIn onSignedIn={() => onSignedIn('store-picker')} />
+        ) : (
+          <WorkerSignIn onSignedIn={() => onSignedIn('app')} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OwnerSignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const buttonRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'signing-in' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -68,7 +106,7 @@ export default function SignIn({ onSignedIn }: SignInProps) {
       try {
         const { token, owner } = await signInWithGoogle(response.credential);
         setSession(token, owner);
-        onSignedIn(owner);
+        onSignedIn();
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
@@ -116,30 +154,92 @@ export default function SignIn({ onSignedIn }: SignInProps) {
   }, [retryCount, onSignedIn]);
 
   return (
-    <div className="setup-screen">
-      <div className="setup-card signin-card">
-        <span className="setup-eyebrow">Welcome to Zoptavi Tab</span>
-        <h1>Sign in to get started</h1>
-        <p className="setup-intro">
-          Sign in with Google to sync your store across devices. The app still works fully offline
-          after you sign in once — billing, stock, and receipts never need an internet connection.
-        </p>
+    <>
+      <p className="setup-intro">
+        Sign in with Google to sync your store across devices. The app still works fully offline
+        after you sign in once — billing, stock, and receipts never need an internet connection.
+      </p>
 
-        <div className="signin-button-wrap">
-          <div ref={buttonRef} />
-          {status === 'loading' && <p className="empty-hint">Loading Google Sign-In…</p>}
-          {status === 'signing-in' && <p className="empty-hint">Signing you in…</p>}
-        </div>
-
-        {status === 'error' && error && (
-          <div className="signin-error">
-            <p>{error}</p>
-            <button className="btn-ghost" onClick={() => setRetryCount((c) => c + 1)}>
-              Retry
-            </button>
-          </div>
-        )}
+      <div className="signin-button-wrap">
+        <div ref={buttonRef} />
+        {status === 'loading' && <p className="empty-hint">Loading Google Sign-In…</p>}
+        {status === 'signing-in' && <p className="empty-hint">Signing you in…</p>}
       </div>
-    </div>
+
+      {status === 'error' && error && (
+        <div className="signin-error">
+          <p>{error}</p>
+          <button className="btn-ghost" onClick={() => setRetryCount((c) => c + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function WorkerSignIn({ onSignedIn }: { onSignedIn: () => void }) {
+  const [storeCode, setStoreCode] = useState('');
+  const [pin, setPin] = useState('');
+  const [status, setStatus] = useState<'idle' | 'signing-in' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  const canSubmit = storeCode.trim().length > 0 && /^\d{6}$/.test(pin);
+
+  async function submit() {
+    if (!canSubmit) return;
+    setStatus('signing-in');
+    setError(null);
+    try {
+      const { token, store } = await signInWithPin(storeCode, pin);
+      setWorkerSession(token, store.id);
+      await saveSettings(remoteStoreToSettings(store));
+      onSignedIn();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
+      setStatus('error');
+    }
+  }
+
+  return (
+    <>
+      <p className="setup-intro">
+        Ask the store owner for the store code and PIN from their Settings screen — no Google
+        account needed. This unlocks billing for just that one store.
+      </p>
+
+      <label>
+        Store code
+        <input
+          value={storeCode}
+          onChange={(e) => setStoreCode(e.target.value.toUpperCase())}
+          placeholder="e.g. K3F9QZ"
+          autoCapitalize="characters"
+          autoFocus
+        />
+      </label>
+      <label>
+        6-digit PIN
+        <input
+          type="password"
+          inputMode="numeric"
+          maxLength={6}
+          value={pin}
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+          placeholder="••••••"
+          onKeyDown={(e) => e.key === 'Enter' && submit()}
+        />
+      </label>
+
+      <button className="btn-solid" disabled={!canSubmit || status === 'signing-in'} onClick={submit}>
+        {status === 'signing-in' ? 'Signing in…' : 'Sign in'}
+      </button>
+
+      {status === 'error' && error && (
+        <div className="signin-error">
+          <p>{error}</p>
+        </div>
+      )}
+    </>
   );
 }

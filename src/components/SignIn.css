@@ -4,6 +4,13 @@
   align-items: stretch;
 }
 
+.signin-role-toggle {
+  margin: 12px 0 4px;
+}
+.signin-role-toggle button {
+  padding: 9px 6px;
+}
+
 .signin-button-wrap {
   display: flex;
   flex-direction: column;

@@ -16,6 +16,8 @@ export interface Item {
   // the common case for most retail/grocery. false/undefined means price is entered before GST.
   mrp?: number; // the GST-inclusive price as entered by the owner, kept only for display/editing
   // so the item card and edit form show the number the owner recognizes, not the derived one.
+  addedBy?: string; // name/email of the signed-in owner who added this item, for provenance —
+  // set once at creation time, never changed by edits.
 }
 
 export interface BillLine {
@@ -61,6 +63,8 @@ export interface StoreSettings {
   thermalWidth: '58mm' | '80mm' | 'a4';
   onboarded: boolean; // has this store completed the first-run business setup?
   supplyContactPhone?: string; // Zoptavi's supply-order WhatsApp number, once set up
+  storeCode?: string; // short code a worker enters (with the PIN) to sign in to this store
+  workerPinSet?: boolean; // whether a worker PIN is currently configured server-side
 }
 
 export interface SupplyOrderLine {

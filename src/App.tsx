@@ -41,7 +41,7 @@ function App() {
   }
 
   if (phase === 'signin') {
-    return <SignIn onSignedIn={() => setPhase('store-picker')} />;
+    return <SignIn onSignedIn={(nextPhase) => setPhase(nextPhase)} />;
   }
 
   if (phase === 'store-picker') {

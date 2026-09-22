@@ -31,15 +31,30 @@ export interface Store {
   invoice_prefix: string | null;
   thermal_width: string | null;
   supply_contact_phone: string | null;
+  store_code: string | null;
+  worker_pin_hash: string | null;
+  worker_pin_fail_count: number;
+  worker_pin_locked_until: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface SessionPayload {
+/** A Google-authenticated owner's session — can manage all their stores. */
+export interface OwnerSessionPayload {
   owner_id: string;
   email: string;
   exp: number;
 }
+
+/** A PIN-authenticated worker's session — scoped to exactly one store, no `kind` field on
+ * owner tokens means old already-issued owner tokens keep verifying after this was added. */
+export interface WorkerSessionPayload {
+  kind: "worker";
+  store_id: string;
+  exp: number;
+}
+
+export type SessionPayload = OwnerSessionPayload | WorkerSessionPayload;
 
 export interface ItemRow {
   id: string;
@@ -54,6 +69,7 @@ export interface ItemRow {
   barcode: string | null;
   mrp_inclusive: number;
   mrp: number | null;
+  added_by: string | null;
   updated_at: string;
   deleted: number;
 }

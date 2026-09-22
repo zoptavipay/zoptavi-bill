@@ -40,3 +40,37 @@ export interface SessionPayload {
   email: string;
   exp: number;
 }
+
+export interface ItemRow {
+  id: string;
+  store_id: string;
+  name: string;
+  hsn: string | null;
+  price: number;
+  gst_rate: number;
+  unit: string | null;
+  stock: number;
+  category: string | null;
+  barcode: string | null;
+  mrp_inclusive: number;
+  mrp: number | null;
+  updated_at: string;
+  deleted: number;
+}
+
+export interface BillRow {
+  id: string;
+  store_id: string;
+  bill_no: string | null;
+  created_at: string;
+  lines_json: string;
+  subtotal: number | null;
+  total_cgst: number | null;
+  total_sgst: number | null;
+  grand_total: number | null;
+  payment_mode: string | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  customer_gstin: string | null;
+  updated_at: string;
+}

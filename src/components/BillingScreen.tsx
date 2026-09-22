@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Bill, BillLine, Item, StoreSettings } from '../types';
 import { makeBillLine, totalsForLines, formatINR, exclusiveFromMrp, round2 } from '../lib/gst';
 import { getItems, updateItemStock, nextBillNumber, saveBill, getSettings, saveSettings, addItem, updateItem } from '../lib/db';
+import { syncNow } from '../lib/sync';
 import { buildBillPdf, billPdfFileName } from '../lib/pdf';
 import { lookupBarcodeOnline } from '../lib/barcodeLookup';
 import Receipt from './Receipt';
@@ -179,6 +180,8 @@ export default function BillingScreen() {
     setItems(refreshed);
     setLastBill(bill);
     clearCart();
+    // Fire-and-forget: don't block the billing UI on network sync. syncNow() never throws.
+    void syncNow();
   }
 
   function printReceipt() {

@@ -2,14 +2,30 @@ import { useEffect, useState } from 'react';
 import type { DashboardStats } from '../lib/stats';
 import { getDashboardStats } from '../lib/stats';
 import { formatINR } from '../lib/gst';
+import { getSyncStatus, onSyncStatusChange, type SyncStatus } from '../lib/sync';
 import './Dashboard.css';
 
 interface DashboardProps {
   onClose: () => void;
 }
 
+/** Small hook powering the sync status indicator: derives from navigator.onLine plus whether
+ * a sync is currently in flight, no polling needed. */
+function useSyncStatus(): SyncStatus {
+  const [status, setStatus] = useState<SyncStatus>(getSyncStatus());
+  useEffect(() => onSyncStatusChange(setStatus), []);
+  return status;
+}
+
+const SYNC_STATUS_LABEL: Record<SyncStatus, string> = {
+  synced: 'Synced',
+  syncing: 'Syncing…',
+  offline: 'Offline',
+};
+
 export default function Dashboard({ onClose }: DashboardProps) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const syncStatus = useSyncStatus();
 
   useEffect(() => {
     getDashboardStats().then(setStats);
@@ -20,6 +36,13 @@ export default function Dashboard({ onClose }: DashboardProps) {
       <div className="receipt-modal-inner dashboard-modal">
         <div className="ledger-header">
           <h2>Dashboard</h2>
+          <span
+            className={`sync-status-dot sync-status-${syncStatus}`}
+            title={`Sync status: ${SYNC_STATUS_LABEL[syncStatus]}`}
+            style={{ fontSize: 12, opacity: 0.75, marginLeft: 8, marginRight: 'auto' }}
+          >
+            ● {SYNC_STATUS_LABEL[syncStatus]}
+          </span>
           <button className="scanner-close" onClick={onClose}>×</button>
         </div>
 

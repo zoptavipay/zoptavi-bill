@@ -1,4 +1,4 @@
-import type { Env, Owner, Store } from "./types.ts";
+import type { BillRow, Env, ItemRow, Owner, Store } from "./types.ts";
 import { GoogleTokenVerificationError, verifyGoogleIdToken } from "./googleAuth.ts";
 import { createSessionToken, getSessionFromRequest } from "./session.ts";
 
@@ -47,6 +47,14 @@ export default {
       const storeMatch = url.pathname.match(/^\/api\/stores\/([^/]+)$/);
       if (storeMatch && request.method === "PATCH") {
         return await handleUpdateStore(request, env, storeMatch[1]);
+      }
+
+      const syncMatch = url.pathname.match(/^\/api\/sync\/([^/]+)$/);
+      if (syncMatch && request.method === "POST") {
+        return await handleSyncPush(request, env, syncMatch[1]);
+      }
+      if (syncMatch && request.method === "GET") {
+        return await handleSyncPull(request, env, syncMatch[1]);
       }
 
       return errorResponse(404, "Not found");
@@ -243,4 +251,211 @@ async function handleUpdateStore(request: Request, env: Env, storeId: string): P
     .first<Store>();
   if (!updated) return errorResponse(500, "Failed to update store");
   return jsonResponse(updated);
+}
+
+/** Frontend camelCase Item shape, as sent/received on /api/sync. */
+interface SyncItem {
+  id: string;
+  name: string;
+  hsn: string;
+  price: number;
+  gstRate: number;
+  unit: string;
+  stock: number;
+  category?: string;
+  barcode?: string;
+  mrpInclusive?: boolean;
+  mrp?: number;
+}
+
+/** Frontend camelCase Bill shape, as sent/received on /api/sync. */
+interface SyncBill {
+  id: string;
+  billNo: string;
+  createdAt: string;
+  lines: unknown[];
+  subtotal: number;
+  totalCgst: number;
+  totalSgst: number;
+  grandTotal: number;
+  paymentMode: string;
+  customerName?: string;
+  customerPhone?: string;
+  customerGstin?: string;
+  synced: boolean;
+}
+
+function itemRowToSyncItem(row: ItemRow): SyncItem {
+  return {
+    id: row.id,
+    name: row.name,
+    hsn: row.hsn ?? "",
+    price: row.price,
+    gstRate: row.gst_rate,
+    unit: row.unit ?? "",
+    stock: row.stock,
+    category: row.category ?? undefined,
+    barcode: row.barcode ?? undefined,
+    mrpInclusive: !!row.mrp_inclusive,
+    mrp: row.mrp ?? undefined,
+  };
+}
+
+function billRowToSyncBill(row: BillRow): SyncBill {
+  return {
+    id: row.id,
+    billNo: row.bill_no ?? "",
+    createdAt: row.created_at,
+    lines: JSON.parse(row.lines_json),
+    subtotal: row.subtotal ?? 0,
+    totalCgst: row.total_cgst ?? 0,
+    totalSgst: row.total_sgst ?? 0,
+    grandTotal: row.grand_total ?? 0,
+    paymentMode: row.payment_mode ?? "cash",
+    customerName: row.customer_name ?? undefined,
+    customerPhone: row.customer_phone ?? undefined,
+    customerGstin: row.customer_gstin ?? undefined,
+    synced: true,
+  };
+}
+
+/** Verifies the session token AND that its owner actually owns `storeId`. Returns null (and has
+ * already sent an appropriate error) on failure, otherwise the verified owner_id. */
+async function requireStoreOwnership(
+  request: Request,
+  env: Env,
+  storeId: string,
+): Promise<{ ownerId: string } | Response> {
+  const session = await getSessionFromRequest(request, env.SESSION_SECRET);
+  if (!session) return errorResponse(401, "Unauthorized");
+
+  const store = await env.DB.prepare("SELECT * FROM stores WHERE id = ?")
+    .bind(storeId)
+    .first<Store>();
+  if (!store) return errorResponse(404, "Store not found");
+  if (store.owner_id !== session.owner_id) return errorResponse(403, "Forbidden");
+
+  return { ownerId: session.owner_id };
+}
+
+async function handleSyncPush(request: Request, env: Env, storeId: string): Promise<Response> {
+  const ownership = await requireStoreOwnership(request, env, storeId);
+  if (ownership instanceof Response) return ownership;
+
+  let body: { items?: SyncItem[]; bills?: SyncBill[] };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "Invalid JSON body");
+  }
+
+  const items = Array.isArray(body.items) ? body.items : [];
+  const bills = Array.isArray(body.bills) ? body.bills : [];
+  const now = new Date().toISOString();
+
+  // Frontend Item/Bill types don't carry their own updated_at, so we stamp "now" on every
+  // pushed row. Combined with the ON CONFLICT ... WHERE excluded.updated_at > <table>.updated_at
+  // guard below, this means "last device to sync wins" for a given row — acceptable for the
+  // small/single-device-per-store scale this app targets in v1.
+  const itemStmt = env.DB.prepare(
+    `INSERT INTO items (id, store_id, name, hsn, price, gst_rate, unit, stock, category, barcode, mrp_inclusive, mrp, updated_at, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+     ON CONFLICT(store_id, id) DO UPDATE SET
+       name = excluded.name, hsn = excluded.hsn, price = excluded.price, gst_rate = excluded.gst_rate,
+       unit = excluded.unit, stock = excluded.stock, category = excluded.category, barcode = excluded.barcode,
+       mrp_inclusive = excluded.mrp_inclusive, mrp = excluded.mrp, updated_at = excluded.updated_at
+     WHERE excluded.updated_at > items.updated_at`,
+  );
+  const billStmt = env.DB.prepare(
+    `INSERT INTO bills (id, store_id, bill_no, created_at, lines_json, subtotal, total_cgst, total_sgst, grand_total, payment_mode, customer_name, customer_phone, customer_gstin, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(store_id, id) DO UPDATE SET
+       bill_no = excluded.bill_no, created_at = excluded.created_at, lines_json = excluded.lines_json,
+       subtotal = excluded.subtotal, total_cgst = excluded.total_cgst, total_sgst = excluded.total_sgst,
+       grand_total = excluded.grand_total, payment_mode = excluded.payment_mode, customer_name = excluded.customer_name,
+       customer_phone = excluded.customer_phone, customer_gstin = excluded.customer_gstin, updated_at = excluded.updated_at
+     WHERE excluded.updated_at > bills.updated_at`,
+  );
+
+  const itemBinds = items.map((it) =>
+    itemStmt.bind(
+      it.id,
+      storeId,
+      it.name,
+      it.hsn ?? null,
+      it.price ?? 0,
+      it.gstRate ?? 0,
+      it.unit ?? null,
+      it.stock ?? 0,
+      it.category ?? null,
+      it.barcode ?? null,
+      it.mrpInclusive ? 1 : 0,
+      it.mrp ?? null,
+      now,
+    ),
+  );
+  const billBinds = bills.map((b) =>
+    billStmt.bind(
+      b.id,
+      storeId,
+      b.billNo ?? null,
+      b.createdAt,
+      JSON.stringify(b.lines ?? []),
+      b.subtotal ?? 0,
+      b.totalCgst ?? 0,
+      b.totalSgst ?? 0,
+      b.grandTotal ?? 0,
+      b.paymentMode ?? null,
+      b.customerName ?? null,
+      b.customerPhone ?? null,
+      b.customerGstin ?? null,
+      now,
+    ),
+  );
+
+  // D1 supports batching prepared statements atomically; fall back to sequential awaits if
+  // the binding doesn't expose .batch() for some reason.
+  const allBinds = [...itemBinds, ...billBinds];
+  if (allBinds.length > 0) {
+    if (typeof env.DB.batch === "function") {
+      await env.DB.batch(allBinds);
+    } else {
+      for (const stmt of allBinds) {
+        await stmt.run();
+      }
+    }
+  }
+
+  return jsonResponse({ ok: true, synced: { items: items.length, bills: bills.length } });
+}
+
+async function handleSyncPull(request: Request, env: Env, storeId: string): Promise<Response> {
+  const ownership = await requireStoreOwnership(request, env, storeId);
+  if (ownership instanceof Response) return ownership;
+
+  const url = new URL(request.url);
+  const since = url.searchParams.get("since") ?? "";
+  const syncedAt = new Date().toISOString();
+
+  const itemRows = since
+    ? await env.DB.prepare(
+        "SELECT * FROM items WHERE store_id = ? AND updated_at > ? AND deleted = 0",
+      )
+        .bind(storeId, since)
+        .all<ItemRow>()
+    : await env.DB.prepare("SELECT * FROM items WHERE store_id = ? AND deleted = 0")
+        .bind(storeId)
+        .all<ItemRow>();
+
+  const billRows = since
+    ? await env.DB.prepare("SELECT * FROM bills WHERE store_id = ? AND updated_at > ?")
+        .bind(storeId, since)
+        .all<BillRow>()
+    : await env.DB.prepare("SELECT * FROM bills WHERE store_id = ?").bind(storeId).all<BillRow>();
+
+  return jsonResponse({
+    items: (itemRows.results ?? []).map(itemRowToSyncItem),
+    bills: (billRows.results ?? []).map(billRowToSyncBill),
+    syncedAt,
+  });
 }

@@ -4,6 +4,7 @@ import SignIn from './components/SignIn';
 import StorePicker from './components/StorePicker';
 import { getActiveStoreId, isSignedIn } from './lib/auth';
 import { getSettings } from './lib/db';
+import { wireAutoSync } from './lib/sync';
 import type { StoreSettings } from './types';
 
 type Phase = 'checking' | 'signin' | 'store-picker' | 'app';
@@ -26,6 +27,14 @@ function App() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    // Once a store is active (signed in + store picked, either just now or from a prior
+    // session), kick off a background sync and start listening for connectivity changes.
+    if (phase === 'app' && isSignedIn() && getActiveStoreId()) {
+      wireAutoSync();
+    }
+  }, [phase]);
 
   if (phase === 'checking' || !localDefaults) {
     return <div className="billing-loading">Loading…</div>;
